@@ -9,7 +9,7 @@ A project of [Center for AI Services Computing (AISC)](https://github.com/Center
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-Express-339933?logo=node.js&logoColor=white)
 
-**ORACLE** binds an LLM-driven agent dispatch to an on-chain trust and audit layer. When a router agent at one organization selects a worker agent at another over a shared relay, ORACLE makes the dispatch itself non-repudiable: the router's decision and the worker's result are co-signed into a single dual-role **EIP-712** audit record, reconstructed and verified on-chain. The relay that submits these transactions holds **no signing key**, so it can pay gas but cannot forge or replay an attribution. A dispute over a failed task drives a stake-slashing loop into reputation, guarded by a circuit breaker that provably never slashes a successful execution.
+**ORACLE** binds an LLM-driven agent dispatch to an on-chain trust and audit layer. When a router agent at one organization selects a worker agent at another over a shared relay, ORACLE makes the dispatch itself non-repudiable: the router's decision and the worker's result are co-signed into a single dual-role **EIP-712** audit record, reconstructed and verified on-chain. The relay that submits these transactions holds **no signing key**, so it can pay gas but cannot forge or replay an attribution. A dispute over a failed task drives a stake-slashing loop on the worker's stake, guarded by a circuit breaker that provably never slashes a successful execution.
 
 Three Solidity contracts provide the substrate — `AgentDID` (identity via hash commit–reveal, **not** a zero-knowledge proof), `AuditLog` (dual-EIP-712 dispatch records), and `Reputation` (reputation-weighted scoring with time decay). A TypeScript backend hosts the Router/Worker agents (SiliconFlow LLMs), and a React frontend drives the flow. Reputation weighting raises the cost of naive Sybil attacks but is **not** collusion-resistant; correctness of LLM output is out of scope (a signature attests authorship, not correctness).
 
@@ -25,14 +25,15 @@ ORACLE 是一个将 **LLM 驱动的 Agent 调度** 与 **链上信任、审计�
 
 ```mermaid
 flowchart TB
-    subgraph Frontend["前端层 · React + TS + Vite + Tailwind + ethers.js v6"]
+    subgraph Frontend["前端层 · React + TS + Vite + 手写 CSS + ethers.js v6"]
         UI1[Dashboard<br/>Agent 注册 + 状态]
         UI2[Dispatch<br/>SSE 流式调度]
         UI3[AuditLog<br/>链上审计查询]
+        UI4[Reputation<br/>信誉分析]
     end
 
     subgraph Agent["Agent 编排层 · Node.js + Express"]
-        API[api-server.js :3001<br/>鉴权 + 限流]
+        API[api-server.ts :3001<br/>鉴权 + 限流]
         Router[RouterAgent<br/>LLM 4 步管线]
         Worker[WorkerAgent<br/>链式思考执行]
         SF[SiliconFlow Client]
@@ -48,6 +49,7 @@ flowchart TB
     UI1 --> API
     UI2 --> API
     UI3 --> AL
+    UI4 --> API
     API --> Router
     API --> Worker
     Router --> SF
@@ -57,16 +59,15 @@ flowchart TB
     Router --> AL
     Worker --> AL
     API --> REP
-    API --> EXT
 ```
 
-> 三个核心合约 `AgentDID` / `AuditLog` / `Reputation` 构成可信路由与审计的主链路；`AgentStake`、`PaymentEscrow` 等为质押与支付扩展。
+> 三个核心合约 `AgentDID` / `AuditLog` / `Reputation` 构成可信路由与审计的主链路；`AgentStake`、`PaymentEscrow` 为质押与支付扩展，`AuditLogOptimized` 为 event-only 成本优化审计（`AUDIT_MODE=optimized` 时写入）。
 
 ## 技术栈
 
 | 层 | 技术 |
 | --- | --- |
-| **前端** | TypeScript · React 18 · Vite · Tailwind CSS · ethers.js v6 |
+| **前端** | TypeScript · React 18 · Vite · 手写 CSS（CSS 自定义属性）· ethers.js v6 |
 | **后端 Agent** | TypeScript（ESM，tsx 运行）· Node.js · Express · SiliconFlow LLM API |
 | **区块链** | Hardhat · Solidity 0.8.20 · TypeChain 类型化合约工厂（本地网络 localhost:8545, chainId 31337；Sepolia 公测网） |
 | **核心机制** | DID 身份（哈希承诺 commit-reveal，非 ZKP）· 双角色 EIP-712 审计日志 · 信誉评分系统 · 争议-罚没管线 |
@@ -77,15 +78,26 @@ flowchart TB
 oracle/
 ├── contracts/              # Solidity 智能合约
 │   ├── AgentDID.sol        # Agent 去中心化身份 + 资质承诺验证
-│   ├── AuditLog.sol        # 调度决策审计追溯
-│   └── Reputation.sol      # 链上信誉分管理
+│   ├── AuditLog.sol        # 调度决策审计追溯（双角色 EIP-712 + 争议罚没）
+│   ├── AuditLogOptimized.sol # 成本优化审计（event-only + M5 编码归属）
+│   ├── Reputation.sol      # 链上信誉分管理（0–100，指数衰减）
+│   ├── AgentStake.sol      # Agent 质押（争议-罚没罚金来源）
+│   ├── PaymentEscrow.sol   # 托管支付扩展
+│   ├── RouterRegistry.sol  # 路由签名者白名单
+│   ├── Governance/         # 治理（OracleGovernor）
+│   └── ccip/ mocks/        # CCIP 桥接 / 测试 mock
 ├── agents/                 # 后端 Agent 层（ESM TypeScript，tsx 运行）
 │   └── src/
 │       ├── api-server.ts       # Express API：调度 / 评分 / 信誉 等端点（含鉴权 + 限流）
 │       ├── router-agent.ts     # Router：意图解析 → 候选筛选 → LLM 评分 → 选择
 │       ├── worker-agents.ts    # Worker：链式思考执行任务，按复杂度选模型
+│       ├── worker-signing.ts   # Worker 密钥分离（demo 助记词派生 / relay 预签名）
+│       ├── audit-adapter.ts    # 审计写入适配（full / optimized 双模式）
 │       ├── reputation-analyzer.ts # 百分制信誉评分分析（0-100）
-│       └── siliconflow-client.ts  # SiliconFlow LLM API 封装
+│       ├── security.ts         # x-api-key 鉴权 + 限流
+│       ├── siliconflow-client.ts  # SiliconFlow LLM API 封装
+│       ├── types.ts            # 共享类型
+│       └── logger.ts           # 日志
 ├── frontend/               # React 前端
 │   └── src/
 │       ├── contracts/abis.ts   # 合约 ABI 绑定
@@ -93,7 +105,8 @@ oracle/
 │       ├── pages/
 │       │   ├── Dashboard.tsx   # Agent 注册 + 状态展示
 │       │   ├── Dispatch.tsx    # 任务调度追踪
-│       │   └── AuditLog.tsx    # 审计日志查询
+│       │   ├── AuditLog.tsx    # 审计日志查询
+│       │   └── Reputation.tsx  # 信誉分析（链上信誉概况）
 │       └── App.tsx             # Tab 路由
 ├── scripts/deploy.js       # 合约部署脚本
 ├── experiments/            # 成本 / 路由 / 争议实验脚本
@@ -112,7 +125,7 @@ npx hardhat node
 
 ### 2. 部署合约
 
-新开终端，部署后会自动写入 `frontend/src/contracts/addresses.json`：
+新开终端，部署后会自动写入 `frontend/src/contracts/addresses.json` 与 `deployments/<network>.json`：
 
 ```bash
 npx hardhat run scripts/deploy.js --network localhost
@@ -126,7 +139,7 @@ npm install
 npm start                   # Express API on :3001（tsx src/api-server.ts）
 ```
 
-> 需配置环境变量（参考 `.env.example`）：`SILICONFLOW_API_KEY`（LLM 调用，必需）、`ROUTER_SIGNER_PRIVATE_KEY` / `REPUTATION_SIGNER_PRIVATE_KEY`（上链签名）、`API_ACCESS_KEYS`（API 鉴权，可选）。
+> 需配置环境变量（参考 `.env.example`）：`SILICONFLOW_API_KEY`（LLM 调用，必需）、`ROUTER_SIGNER_PRIVATE_KEY` / `REPUTATION_SIGNER_PRIVATE_KEY`（上链签名）、`API_ACCESS_KEYS`（API 鉴权；为空时仅 `NODE_ENV=development` 下放行，否则返回 503 fail-secure）。
 
 ### 4. 启动前端
 
@@ -138,12 +151,14 @@ npm run dev                 # Vite dev server on :5173
 
 打开 <http://localhost:5173>
 
+> 无 MetaMask 注入时，前端自动回退到 Hardhat 默认 signer（chainId 31337），便于无钱包的本地 / E2E 运行。
+
 ## 数据流
 
 1. **Dashboard** → 注册 Agent：`AgentDID.registerAgent()` 上链（DID + 资质承诺）
-2. **Dispatch** → 提交任务：前端调用 `/api/dispatch`
+2. **Dispatch** → 提交任务：前端调用 `/api/dispatch/stream`（SSE 流式）
 3. **Router Agent** → 读取链上 Agent 列表与信誉分，LLM 评分（`score = 0.6·q + 0.4·rNorm`，q∈{60,40} 为资质匹配度，rNorm 为信誉归一化），选出最优 Agent；LLM 失败时回退到同权重的规则匹配
-4. **Worker Agent** → LLM 链式思考执行任务（按复杂度选模型：长文/含「分析·计算·创作」→ DeepSeek-V3，否则 Qwen2.5-7B），返回结果与推理过程
+4. **Worker Agent** → LLM 链式思考执行任务（按复杂度选模型：长文（>100 字）或含「分析·详细·复杂」→ DeepSeek-V3，否则 Qwen2.5-7B），返回结果与推理过程
 5. **API Server** → 将调度决策与执行结果写入 `AuditLog` 合约
 6. **Audit Log** → 前端直接从链上读取完整调度记录（transactionHash 可验证）
 
@@ -177,7 +192,7 @@ sequenceDiagram
     W-->>API: 结果摘要
     API->>AL: 更新执行结果（workerSig）
     AL-->>API: txHash
-    API->>REP: 评分上链（rateWeighted）
+    API->>REP: 评分上链（addRating）
     API-->>FE: SSE 流式事件
     FE-->>U: 展示结果
 ```
@@ -193,19 +208,20 @@ sequenceDiagram
 ### 审计追溯（AuditLog）
 
 - 所有调度决策上链：`timestamp、requester、targetAgent、decisionReason、executionResult`
-- 支持按 Agent、请求方、时间范围查询
-- transactionHash 可验证完整链路，记录不可篡改
+- 双角色 EIP-712：Router 决策签名 + Worker 结果签名合入同一记录，链上 ecrecover 验证；EIP-712 domain 含 chainId 与 verifyingContract，防跨链 / 跨合约重放
+- 签名模式：`WORKER_SIGNING_MODE=demo`（默认，后端从助记词派生 worker 密钥，本地演示用）或 `relay`（生产，后端不持 worker 密钥，仅转发 agent 预签名 payload）
+- 支持按 Agent、请求方、时间范围查询；transactionHash 可验证完整链路，记录不可篡改
 
 ### 信誉系统（Reputation）
 
 - 任务完成后调用方评分，百分制（`MIN_RATING=0` ~ `MAX_RATING=100`）
-- 加权平均：评分者按自身信誉的平方根加权（`weight = sqrt(raterAvg)`），抑制低信誉刷分
-- `isReliable()` 要求加权平均分 ≥ 60 且评分数 ≥ 3；另有 `timeDecayed()` 时间衰减与 `isReliableWeighted()` 变体
+- 加权评分：`Reputation` 提供 `rateWeighted()`（评分者按自身信誉平方根加权，`weight = sqrt(raterAvg)`，抑制低信誉刷分）与 `rateStakeWeighted()`（质押绑定权重，e6 实验用）。注意：后端调度 / 用户评分主流程调用 `addRating()`（权重 1 的简单平均）
+- `isReliable()` 要求平均分 ≥ 60 且评分数 ≥ 3；另有 `timeDecayed()` 指数半衰期时间衰减（`averageRating · 2^(-Δt/halfLife)`，无硬归零悬崖）与 `isReliableWeighted()` 变体
 - Router 调度决策查询链上信誉分作为参考，含降权惩罚（`penalty`）机制
 
 ## API 端点
 
-后端 Express 服务（`:3001`）。`/api/dispatch`、`/api/dispatch/stream`、`/api/user-rating` 受 `x-api-key` 鉴权 + 限流保护（通过 `API_ACCESS_KEYS` 配置；为空则关闭鉴权）。
+后端 Express 服务（`:3001`）。`/api/dispatch`、`/api/dispatch/stream`、`/api/user-rating` 受 `x-api-key` 鉴权 + 限流保护（通过 `API_ACCESS_KEYS` 配置；为空时仅 `NODE_ENV=development` 下放行，否则返回 503 `AUTH_NOT_CONFIGURED` fail-secure）。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -240,13 +256,26 @@ npx hardhat run experiments/e6-stake-weighted.js  # 质押绑定评分权重（�
 npx hardhat run experiments/e1-sepolia-gas.js     # Sepolia 真实 gas 测量（需配 Sepolia RPC 与资金账户）
 ```
 
+成本前沿的扩展变体（M4–M7 与优化合约 Sepolia 实测）：
+
+```bash
+npx hardhat run experiments/batch-anchoring.js               # M4 批量锚定
+npx hardhat run experiments/m5-encoded-recordid.js           # M5 编码 recordId（event-only 归属零锚点）
+npx hardhat run experiments/m6-compact.js                    # M6 紧凑编码
+npx hardhat run experiments/m7-batch-compact.js              # M7 批量紧凑编码
+npx hardhat run experiments/optimized-sepolia.js             # AuditLogOptimized 在 Sepolia 的真实 gas 实测
+npx hardhat run experiments/gas-breakdown.js                 # M6 gas 拆解
+npx hardhat run experiments/verify-optimized-integration.js  # 优化路径集成校验
+```
+
 多 LLM 路由泛化实验（E7）复用生产 `RouterAgent.evaluateCandidates` 打分路径，
 以确定性 `ruleScore`（论文公式 3）为 ground-truth，测不同开/闭源模型作打分器时的
 Top-1 一致率、Kendall τ 排序保真与兜底率。它是 ESM/TypeScript 脚本，经 `tsx` 运行：
 
 ```bash
 # 需 SILICONFLOW_API_KEY（开源模型池）；OPENAI_API_KEY 可选（GPT 等 OpenAI 兼容闭源模型，
-# 经 OPENAI_BASE_URL 注入）。不可用模型自动 preflight 跳过并记入 skippedModels。
+# 经 OPENAI_BASE_URL 注入）；Llama-3.3-70B 经 LLAMA_API_KEY + LLAMA_BASE_URL 注入。
+# 不可用模型自动 preflight 跳过并记入 skippedModels。
 ./agents/node_modules/.bin/tsx experiments/e7-multi-llm-routing.ts            # 真跑，产物 data/e7-results.json
 ./agents/node_modules/.bin/tsx experiments/e7-multi-llm-routing.ts --dry-run  # 校验指标管道（不调 API）
 REPEAT=3 MODEL_BUDGET_S=150 ./agents/node_modules/.bin/tsx experiments/e7-multi-llm-routing.ts  # 每场景重复取多数 + 每模型墙钟预算
